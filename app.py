@@ -406,6 +406,7 @@ def aplicar_formula(d: pd.DataFrame) -> pd.DataFrame:
     d["hora_salida"] = sep.map(lambda x: x[0])
     d["notas_txt"] = sep.map(lambda x: x[1])
     dur = d["hora_salida"].map(_minutos) - d["hora"].map(_minutos)
+    d["duracion_min"] = dur.where(dur >= 0)
     d["duracion"] = dur.map(fmt_duracion)
     return d
 
@@ -513,7 +514,7 @@ with tabs[0]:
         c[4].markdown(kpi("Gan. media / Pérd. media", ratio(m["ratio_media"]), bar), unsafe_allow_html=True)
 
         st.write("")
-        c2 = st.columns(4)
+        c2 = st.columns(5)
         c2[0].markdown(kpi("Ratio ganadores vs perdedores", ratio(m["ratio_gan_perd"]),
                            f'{m["ganadores"]} ganadores / {m["perdedores"]} perdedores'), unsafe_allow_html=True)
         c2[1].markdown(kpi("Máximo drawdown", money(m["max_drawdown"]),
@@ -526,6 +527,17 @@ with tabs[0]:
                            f'Peor: <span style="color:{RED}">{money(m["peor_trade"])}</span> · '
                            f'rachas {m["max_racha_ganadora"]}G / {m["max_racha_perdedora"]}P', GREEN),
                        unsafe_allow_html=True)
+        dmin_all = df["duracion_min"].dropna() if "duracion_min" in df else pd.Series(dtype=float)
+        if len(dmin_all):
+            d_g = df.loc[df["pnl_neto"] > 0, "duracion_min"].dropna()
+            d_p = df.loc[df["pnl_neto"] < 0, "duracion_min"].dropna()
+            sub_t = (f'Ganadores: <span style="color:{GREEN}">{fmt_duracion(d_g.mean()) or "—"}</span> · '
+                     f'Perdedores: <span style="color:{RED}">{fmt_duracion(d_p.mean()) or "—"}</span>'
+                     f'<br>{len(dmin_all)} de {len(df)} trades con hora de salida')
+            val_t = fmt_duracion(dmin_all.mean()) or "0 min"
+        else:
+            val_t, sub_t = "—", "Cargá la hora de entrada y de salida para calcularlo"
+        c2[4].markdown(kpi("Tiempo promedio por trade", val_t, sub_t), unsafe_allow_html=True)
 
         with st.expander("¿Cómo se calcula la esperanza matemática?"):
             st.markdown(
