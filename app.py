@@ -344,8 +344,27 @@ if APP_PASSWORD and not st.session_state.get("auth_ok"):
             st.error("Contraseña incorrecta.")
     st.stop()
 
+MULT_OPC = 100.0  # cada contrato de opciones = 100 acciones
+
+
+def aplicar_formula(d: pd.DataFrame) -> pd.DataFrame:
+    """Opciones: P&L = salida*100*contratos - entrada*100*contratos - comisiones.
+    Siempre igual, sea Call o Put."""
+    if not len(d):
+        return d
+    d = d.copy()
+    d["lado"] = d["lado"].replace({"Long": "Call", "Short": "Put"})
+    cant = pd.to_numeric(d["cantidad"], errors="coerce").fillna(1)
+    bruto = (pd.to_numeric(d["salida"], errors="coerce") - pd.to_numeric(d["entrada"], errors="coerce")) * MULT_OPC * cant
+    for col in ("pnl_bruto", "pnl"):
+        if col in d.columns:
+            d[col] = bruto
+    d["pnl_neto"] = bruto - pd.to_numeric(d["costo"], errors="coerce").fillna(0)
+    return d
+
+
 try:
-    df_all = core.load_trades()
+    df_all = aplicar_formula(core.load_trades())
 except Exception as e:
     st.error(
         "No me pude conectar a la base de datos. Revisá la URL en *Settings → Secrets* "
@@ -371,7 +390,7 @@ with st.sidebar:
         dmin, dmax = df_all["dt"].min().date(), df_all["dt"].max().date()
         rango = st.date_input("Rango de fechas", value=(dmin, dmax), format="DD/MM/YYYY")
         simbolos = st.multiselect("Símbolos", sorted(df_all["simbolo"].unique()))
-        lados = st.multiselect("Lado", ["Long", "Short"])
+        lados = st.multiselect("Tipo", ["Call", "Put"])
         setups_disp = sorted(df_all["setup"].dropna().astype(str).unique())
         setups = st.multiselect("Setup", setups_disp) if setups_disp else []
     else:
@@ -426,7 +445,7 @@ with tabs[0]:
     else:
         c = st.columns(5)
         c[0].markdown(kpi("P&L neto", money(m["pnl_neto"]),
-                          f'{m["total_trades"]} trades · costos {money(m["costos"])}', color_of(m["pnl_neto"])),
+                          f'{m["total_trades"]} trades · comisiones {money(m["costos"])}', color_of(m["pnl_neto"])),
                       unsafe_allow_html=True)
         c[1].markdown(kpi("Esperanza matemática", money(m["esperanza"]), "por trade",
                           color_of(m["esperanza"])), unsafe_allow_html=True)
@@ -511,34 +530,21 @@ with tabs[1]:
 
     if "f_sym" not in st.session_state:
         st.session_state.f_sym = ""
-    if "f_mult" not in st.session_state:
-        st.session_state.f_mult = 1.0
-
-    def aplicar_preset():
-        p = st.session_state.preset
-        if p and p != "—":
-            st.session_state.f_mult = float(core.MULTIPLICADORES[p])
-            if p != "Acciones / CEDEARs":
-                st.session_state.f_sym = p
-
-    st.selectbox("Instrumento rápido (completa símbolo y multiplicador)",
-                 ["—"] + list(core.MULTIPLICADORES), key="preset", on_change=aplicar_preset,
-                 help="El multiplicador es el valor en $ de 1 punto por contrato: ES=50, MES=5, NQ=20, MNQ=2…")
+    st.caption("P&L = (precio de salida × 100 − precio de entrada × 100) × contratos − comisiones")
 
     with st.form("nuevo_trade"):
         a1, a2, a3, a4 = st.columns(4)
         f_fecha = a1.date_input("Fecha", value=date.today(), format="DD/MM/YYYY")
         f_hora = a2.time_input("Hora de entrada", value=None, step=60)
-        f_sym = a3.text_input("Símbolo", key="f_sym", placeholder="MES, NQ, GGAL…")
-        f_lado = a4.radio("Lado", ["Long", "Short"], horizontal=True)
+        f_sym = a3.text_input("Símbolo", key="f_sym", placeholder="QQQ, SPY, AAPL…")
+        f_lado = a4.radio("Tipo", ["Call", "Put"], horizontal=True)
 
-        b1, b2, b3, b4, b5 = st.columns(5)
+        b1, b2, b3, b5 = st.columns(4)
         f_ent = b1.number_input("Precio de entrada", min_value=0.0, value=0.0, step=0.25, format="%.4f")
         f_sal = b2.number_input("Precio de salida", min_value=0.0, value=0.0, step=0.25, format="%.4f")
         f_qty = b3.number_input("Cantidad de contratos", min_value=0.0, value=1.0, step=1.0)
-        f_mult = b4.number_input("Multiplicador ($/punto)", min_value=0.0, step=1.0, key="f_mult")
-        f_cost = b5.number_input("Costo total ($)", min_value=0.0, value=0.0, step=0.5,
-                                 help="Comisiones + fees del trade completo (entrada y salida).")
+        f_cost = b5.number_input("Comisiones ($)", min_value=0.0, value=0.0, step=0.5,
+                                 help="Total de comisiones del trade completo (entrada y salida).")
 
         c1, c2 = st.columns([1, 2])
         f_setup = c1.text_input("Setup / estrategia (opcional)")
@@ -556,11 +562,11 @@ with tabs[1]:
                 "hora": f_hora.strftime("%H:%M") if f_hora else None,
                 "simbolo": f_sym.strip().upper(), "lado": f_lado,
                 "entrada": f_ent, "salida": f_sal, "cantidad": f_qty,
-                "multiplicador": f_mult or 1.0, "costo": f_cost,
+                "multiplicador": MULT_OPC, "costo": f_cost,
                 "setup": f_setup.strip() or None, "notas": f_notas.strip() or None,
             }
             core.add_trade(t)
-            pnl = core.enrich(pd.DataFrame([{**t, "id": 0}]))["pnl_neto"].iloc[0]
+            pnl = (f_sal - f_ent) * MULT_OPC * f_qty - f_cost
             st.session_state.msg_ok = f"Trade guardado: {t['simbolo']} {f_lado} — P&L neto **{money(pnl)}**"
             st.rerun()
 
@@ -570,14 +576,14 @@ with tabs[1]:
     st.divider()
     st.subheader("Importar desde CSV o Excel")
     st.caption("Columnas: **fecha, simbolo, entrada, salida, cantidad** (obligatorias) y opcionales "
-               "**hora, lado (Long/Short), multiplicador, costo, setup, notas**. También acepta nombres en inglés "
+               "**hora, lado (Call/Put), costo (comisiones), setup, notas**. También acepta nombres en inglés "
                "(date, symbol, side, entry, exit, qty, fees…).")
     st.download_button("📄 Descargar plantilla CSV", core.template_csv(), "plantilla_trades.csv", "text/csv")
     up = st.file_uploader("Archivo", type=["csv", "xlsx", "xls"])
     if up is not None:
         try:
             raw = pd.read_csv(up, sep=None, engine="python") if up.name.lower().endswith(".csv") else pd.read_excel(up)
-            prev = core.enrich(core.normalize_import(raw).assign(id=range(len(raw)))) if len(raw) else raw
+            prev = aplicar_formula(core.enrich(core.normalize_import(raw).assign(id=range(len(raw))))) if len(raw) else raw
             st.write(f"Se detectaron **{len(prev)}** trades válidos:")
             st.dataframe(prev.drop(columns=["id", "dt", "mes", "dia_semana"], errors="ignore").head(50), hide_index=True)
             if st.button("✅ Importar estos trades", type="primary"):
@@ -608,13 +614,16 @@ with tabs[2]:
         k[1].markdown(kpi("% ganadores", f'{md["pct_ganadores"] * 100:.0f}%',
                           f'{md["ganadores"]}G / {md["perdedores"]}P'), unsafe_allow_html=True)
         k[2].markdown(kpi("Profit factor", ratio(md["profit_factor"])), unsafe_allow_html=True)
-        k[3].markdown(kpi("Costos", money(md["costos"])), unsafe_allow_html=True)
+        k[3].markdown(kpi("Comisiones", money(md["costos"])), unsafe_allow_html=True)
         cc1, cc2 = st.columns([1.3, 1])
         with cc1:
             cols = ["hora", "simbolo", "lado", "entrada", "salida", "cantidad", "costo", "pnl_neto", "setup", "notas"]
             st.dataframe(dd[cols].style.map(color_pnl, subset=["pnl_neto"])
                          .format({"pnl_neto": "${:,.2f}", "costo": "${:,.2f}", "entrada": "{:,.2f}", "salida": "{:,.2f}"}),
-                         hide_index=True)
+                         hide_index=True,
+                         column_config={"hora": "Hora", "simbolo": "Símbolo", "lado": "Tipo", "entrada": "Entrada",
+                                        "salida": "Salida", "cantidad": "Contratos", "costo": "Comisiones",
+                                        "pnl_neto": "P&L neto", "setup": "Setup", "notas": "Notas"})
         with cc2:
             st.plotly_chart(equity_fig(core.equity_curve(dd, 0, "trade"), 0, "trade", False, 260), key="day_eq")
 
@@ -660,7 +669,7 @@ with tabs[4]:
         st.info("Cargá trades para ver los reportes.")
     else:
         opciones = {"Día de la semana": ("dia_semana", "día"), "Símbolo": ("simbolo", "símbolo"),
-                    "Setup": ("setup", "setup"), "Hora": ("hora_bloque", "hora"), "Lado": ("lado", "lado"),
+                    "Setup": ("setup", "setup"), "Hora": ("hora_bloque", "hora"), "Tipo (Call/Put)": ("lado", "tipo"),
                     "Mes": ("mes", "mes")}
         sel = st.radio("Agrupar por", list(opciones), horizontal=True)
         key, titulo = opciones[sel]
@@ -688,7 +697,7 @@ with tabs[4]:
         st.markdown('<div class="panel-title">Ganadores vs perdedores</div>', unsafe_allow_html=True)
         w, l = df[df["pnl_neto"] > 0], df[df["pnl_neto"] < 0]
         comp = pd.DataFrame({
-            "Métrica": ["Cantidad", "P&L total", "P&L medio", "Mayor", "Cantidad media de contratos", "Costo medio"],
+            "Métrica": ["Cantidad", "P&L total", "P&L medio", "Mayor", "Cantidad media de contratos", "Comisión media"],
             "Ganadores": [len(w), money(w["pnl_neto"].sum()), money(w["pnl_neto"].mean() if len(w) else 0),
                           money(w["pnl_neto"].max() if len(w) else 0), f'{w["cantidad"].mean() if len(w) else 0:.2f}',
                           money(w["costo"].mean() if len(w) else 0)],
@@ -723,12 +732,12 @@ with tabs[5]:
                 "fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY", required=True),
                 "hora": st.column_config.TextColumn("Hora", help="HH:MM"),
                 "simbolo": st.column_config.TextColumn("Símbolo", required=True),
-                "lado": st.column_config.SelectboxColumn("Lado", options=["Long", "Short"], required=True),
+                "lado": st.column_config.SelectboxColumn("Tipo", options=["Call", "Put"], required=True),
                 "entrada": st.column_config.NumberColumn("Entrada", format="%.2f", required=True),
                 "salida": st.column_config.NumberColumn("Salida", format="%.2f", required=True),
-                "cantidad": st.column_config.NumberColumn("Cantidad", required=True),
-                "multiplicador": st.column_config.NumberColumn("Mult.", default=1.0),
-                "costo": st.column_config.NumberColumn("Costo", format="$%.2f", default=0.0),
+                "cantidad": st.column_config.NumberColumn("Contratos", required=True),
+                "multiplicador": None,  # siempre 100 (opciones)
+                "costo": st.column_config.NumberColumn("Comisiones", format="$%.2f", default=0.0),
                 "setup": st.column_config.TextColumn("Setup"),
                 "notas": st.column_config.TextColumn("Notas", width="large"),
                 "pnl_neto": st.column_config.NumberColumn("P&L neto", format="$%.2f", disabled=True),
