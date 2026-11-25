@@ -345,11 +345,12 @@ if APP_PASSWORD and not st.session_state.get("auth_ok"):
     st.stop()
 
 MULT_OPC = 100.0  # cada contrato de opciones = 100 acciones
+COMISION_CONTRATO = 0.65  # USD por contrato, se cobra al comprar y al vender
 
 
 def aplicar_formula(d: pd.DataFrame) -> pd.DataFrame:
-    """Opciones: P&L = salida*100*contratos - entrada*100*contratos - comisiones.
-    Siempre igual, sea Call o Put."""
+    """Opciones: P&L = (salida*100 - entrada*100) * contratos - 0,65 * 2 * contratos.
+    Siempre igual, sea Call o Put. Las comisiones se calculan solas."""
     if not len(d):
         return d
     d = d.copy()
@@ -359,7 +360,8 @@ def aplicar_formula(d: pd.DataFrame) -> pd.DataFrame:
     for col in ("pnl_bruto", "pnl"):
         if col in d.columns:
             d[col] = bruto
-    d["pnl_neto"] = bruto - pd.to_numeric(d["costo"], errors="coerce").fillna(0)
+    d["costo"] = COMISION_CONTRATO * 2 * cant
+    d["pnl_neto"] = bruto - d["costo"]
     return d
 
 
@@ -530,7 +532,8 @@ with tabs[1]:
 
     if "f_sym" not in st.session_state:
         st.session_state.f_sym = ""
-    st.caption("P&L = (precio de salida × 100 − precio de entrada × 100) × contratos − comisiones")
+    st.caption("P&L = (precio de salida × 100 − precio de entrada × 100) × contratos − comisiones "
+               "(USD 0,65 por contrato al comprar + USD 0,65 al vender, se calculan solas)")
 
     with st.form("nuevo_trade"):
         a1, a2, a3, a4 = st.columns(4)
@@ -539,12 +542,10 @@ with tabs[1]:
         f_sym = a3.text_input("Símbolo", key="f_sym", placeholder="QQQ, SPY, AAPL…")
         f_lado = a4.radio("Tipo", ["Call", "Put"], horizontal=True)
 
-        b1, b2, b3, b5 = st.columns(4)
+        b1, b2, b3 = st.columns(3)
         f_ent = b1.number_input("Precio de entrada", min_value=0.0, value=0.0, step=0.25, format="%.4f")
         f_sal = b2.number_input("Precio de salida", min_value=0.0, value=0.0, step=0.25, format="%.4f")
         f_qty = b3.number_input("Cantidad de contratos", min_value=0.0, value=1.0, step=1.0)
-        f_cost = b5.number_input("Comisiones ($)", min_value=0.0, value=0.0, step=0.5,
-                                 help="Total de comisiones del trade completo (entrada y salida).")
 
         c1, c2 = st.columns([1, 2])
         f_setup = c1.text_input("Setup / estrategia (opcional)")
@@ -557,6 +558,7 @@ with tabs[1]:
         elif f_ent <= 0 or f_sal <= 0 or f_qty <= 0:
             st.error("Entrada, salida y cantidad tienen que ser mayores a 0.")
         else:
+            f_cost = COMISION_CONTRATO * 2 * f_qty
             t = {
                 "fecha": f_fecha.strftime("%Y-%m-%d"),
                 "hora": f_hora.strftime("%H:%M") if f_hora else None,
@@ -567,7 +569,7 @@ with tabs[1]:
             }
             core.add_trade(t)
             pnl = (f_sal - f_ent) * MULT_OPC * f_qty - f_cost
-            st.session_state.msg_ok = f"Trade guardado: {t['simbolo']} {f_lado} — P&L neto **{money(pnl)}**"
+            st.session_state.msg_ok = f"Trade guardado: {t['simbolo']} {f_lado} — P&L neto **{money(pnl)}** (comisiones {money(f_cost)})"
             st.rerun()
 
     if st.session_state.get("msg_ok"):
@@ -576,7 +578,7 @@ with tabs[1]:
     st.divider()
     st.subheader("Importar desde CSV o Excel")
     st.caption("Columnas: **fecha, simbolo, entrada, salida, cantidad** (obligatorias) y opcionales "
-               "**hora, lado (Call/Put), costo (comisiones), setup, notas**. También acepta nombres en inglés "
+               "**hora, lado (Call/Put), setup, notas**. Las comisiones se calculan solas. También acepta nombres en inglés "
                "(date, symbol, side, entry, exit, qty, fees…).")
     st.download_button("📄 Descargar plantilla CSV", core.template_csv(), "plantilla_trades.csv", "text/csv")
     up = st.file_uploader("Archivo", type=["csv", "xlsx", "xls"])
@@ -737,7 +739,7 @@ with tabs[5]:
                 "salida": st.column_config.NumberColumn("Salida", format="%.2f", required=True),
                 "cantidad": st.column_config.NumberColumn("Contratos", required=True),
                 "multiplicador": None,  # siempre 100 (opciones)
-                "costo": st.column_config.NumberColumn("Comisiones", format="$%.2f", default=0.0),
+                "costo": st.column_config.NumberColumn("Comisiones", format="$%.2f", disabled=True),
                 "setup": st.column_config.TextColumn("Setup"),
                 "notas": st.column_config.TextColumn("Notas", width="large"),
                 "pnl_neto": st.column_config.NumberColumn("P&L neto", format="$%.2f", disabled=True),
