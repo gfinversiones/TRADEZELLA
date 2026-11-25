@@ -29,7 +29,13 @@ GREEN_BG, RED_BG = "#e8f7ee", "#fdecec"
 st.markdown(
     """
 <style>
-.block-container {padding-top: 1.6rem;}
+.block-container {padding-top: 4rem !important;}
+/* Pestañas: más grandes, oscuras y legibles */
+.stTabs [data-baseweb="tab-list"] {gap: 1.2rem;}
+.stTabs [data-baseweb="tab"] p {font-size: 1.05rem !important; font-weight: 600 !important; color: #1f1f1f !important;}
+/* Barra lateral: textos más oscuros */
+[data-testid="stSidebar"] p, [data-testid="stSidebar"] small,
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {color: #2b2b2b !important;}
 .kpi {background:#fff;border:1px solid #ececf3;border-radius:14px;padding:14px 16px;
       display:flex;justify-content:space-between;align-items:center;min-height:104px;
       box-shadow:0 1px 2px rgba(16,24,40,.04);}
