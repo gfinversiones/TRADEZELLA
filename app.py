@@ -7,6 +7,7 @@ from __future__ import annotations
 import calendar
 import hmac
 import os
+import re
 from datetime import date, datetime
 from math import pi
 
@@ -348,6 +349,45 @@ MULT_OPC = 100.0  # cada contrato de opciones = 100 acciones
 COMISION_CONTRATO = 0.65  # USD por contrato, se cobra al comprar y al vender
 
 
+TAG_SALIDA = re.compile(r"^\s*\[Salida (\d{1,2}:\d{2})\]\s*")
+
+
+def separar_salida(notas) -> tuple[str | None, str | None]:
+    """La hora de salida se guarda al principio de las notas como "[Salida HH:MM]".
+    Devuelve (hora_salida, notas_sin_la_etiqueta)."""
+    if notas is None or (isinstance(notas, float) and np.isnan(notas)):
+        return None, None
+    txt = str(notas)
+    mt = TAG_SALIDA.match(txt)
+    if not mt:
+        return None, txt or None
+    resto = txt[mt.end():].strip()
+    return mt.group(1).zfill(5), resto or None
+
+
+def unir_salida(hora_salida, notas) -> str | None:
+    hs = str(hora_salida).strip() if hora_salida is not None and not (isinstance(hora_salida, float) and np.isnan(hora_salida)) else ""
+    nt = str(notas).strip() if notas is not None and not (isinstance(notas, float) and np.isnan(notas)) else ""
+    if hs:
+        return f"[Salida {hs}] {nt}".strip()
+    return nt or None
+
+
+def _minutos(h) -> float:
+    try:
+        hh, mm = str(h).split(":")[:2]
+        return int(hh) * 60 + int(mm)
+    except Exception:
+        return np.nan
+
+
+def fmt_duracion(mins) -> str:
+    if mins is None or pd.isna(mins) or mins < 0:
+        return ""
+    mins = int(mins)
+    return f"{mins // 60} h {mins % 60:02d} min" if mins >= 60 else f"{mins} min"
+
+
 def aplicar_formula(d: pd.DataFrame) -> pd.DataFrame:
     """Opciones: P&L = (salida*100 - entrada*100) * contratos - 0,65 * 2 * contratos.
     Siempre igual, sea Call o Put. Las comisiones se calculan solas."""
@@ -362,6 +402,11 @@ def aplicar_formula(d: pd.DataFrame) -> pd.DataFrame:
             d[col] = bruto
     d["costo"] = COMISION_CONTRATO * 2 * cant
     d["pnl_neto"] = bruto - d["costo"]
+    sep = d["notas"].map(separar_salida)
+    d["hora_salida"] = sep.map(lambda x: x[0])
+    d["notas_txt"] = sep.map(lambda x: x[1])
+    dur = d["hora_salida"].map(_minutos) - d["hora"].map(_minutos)
+    d["duracion"] = dur.map(fmt_duracion)
     return d
 
 
@@ -536,9 +581,10 @@ with tabs[1]:
                "(USD 0,65 por contrato al comprar + USD 0,65 al vender, se calculan solas)")
 
     with st.form("nuevo_trade"):
-        a1, a2, a3, a4 = st.columns(4)
+        a1, a2, a2b, a3, a4 = st.columns([1.1, 1, 1, 1, 1])
         f_fecha = a1.date_input("Fecha", value=date.today(), format="DD/MM/YYYY")
         f_hora = a2.time_input("Hora de entrada", value=None, step=60)
+        f_hora_sal = a2b.time_input("Hora de salida", value=None, step=60)
         f_sym = a3.text_input("Símbolo", key="f_sym", placeholder="QQQ, SPY, AAPL…")
         f_lado = a4.radio("Tipo", ["Call", "Put"], horizontal=True)
 
@@ -565,11 +611,17 @@ with tabs[1]:
                 "simbolo": f_sym.strip().upper(), "lado": f_lado,
                 "entrada": f_ent, "salida": f_sal, "cantidad": f_qty,
                 "multiplicador": MULT_OPC, "costo": f_cost,
-                "setup": f_setup.strip() or None, "notas": f_notas.strip() or None,
+                "setup": f_setup.strip() or None,
+                "notas": unir_salida(f_hora_sal.strftime("%H:%M") if f_hora_sal else None, f_notas),
             }
             core.add_trade(t)
             pnl = (f_sal - f_ent) * MULT_OPC * f_qty - f_cost
-            st.session_state.msg_ok = f"Trade guardado: {t['simbolo']} {f_lado} — P&L neto **{money(pnl)}** (comisiones {money(f_cost)})"
+            dur_txt = ""
+            if f_hora and f_hora_sal:
+                dur_txt = fmt_duracion((f_hora_sal.hour * 60 + f_hora_sal.minute) - (f_hora.hour * 60 + f_hora.minute))
+                dur_txt = f" · duración {dur_txt}" if dur_txt else ""
+            st.session_state.msg_ok = (f"Trade guardado: {t['simbolo']} {f_lado} — P&L neto **{money(pnl)}** "
+                                       f"(comisiones {money(f_cost)}){dur_txt}")
             st.rerun()
 
     if st.session_state.get("msg_ok"):
@@ -619,13 +671,15 @@ with tabs[2]:
         k[3].markdown(kpi("Comisiones", money(md["costos"])), unsafe_allow_html=True)
         cc1, cc2 = st.columns([1.3, 1])
         with cc1:
-            cols = ["hora", "simbolo", "lado", "entrada", "salida", "cantidad", "costo", "pnl_neto", "setup", "notas"]
+            cols = ["hora", "hora_salida", "duracion", "simbolo", "lado", "entrada", "salida", "cantidad", "costo",
+                    "pnl_neto", "setup", "notas_txt"]
             st.dataframe(dd[cols].style.map(color_pnl, subset=["pnl_neto"])
                          .format({"pnl_neto": "${:,.2f}", "costo": "${:,.2f}", "entrada": "{:,.2f}", "salida": "{:,.2f}"}),
                          hide_index=True,
-                         column_config={"hora": "Hora", "simbolo": "Símbolo", "lado": "Tipo", "entrada": "Entrada",
+                         column_config={"hora": "Entrada (hora)", "hora_salida": "Salida (hora)", "duracion": "Duración",
+                                        "simbolo": "Símbolo", "lado": "Tipo", "entrada": "Entrada",
                                         "salida": "Salida", "cantidad": "Contratos", "costo": "Comisiones",
-                                        "pnl_neto": "P&L neto", "setup": "Setup", "notas": "Notas"})
+                                        "pnl_neto": "P&L neto", "setup": "Setup", "notas_txt": "Notas"})
         with cc2:
             st.plotly_chart(equity_fig(core.equity_curve(dd, 0, "trade"), 0, "trade", False, 260), key="day_eq")
 
@@ -727,12 +781,16 @@ with tabs[5]:
                    "Después tocá **Guardar cambios**. El P&L se recalcula al guardar.")
         edit = df[core.COLUMNS + ["pnl_neto"]].copy()
         edit["fecha"] = pd.to_datetime(edit["fecha"]).dt.date
+        # La hora de salida va en su propia columna (por dentro se guarda en las notas)
+        edit["notas"] = df["notas_txt"].values
+        edit.insert(list(edit.columns).index("hora") + 1, "hora_salida", df["hora_salida"].values)
         edited = st.data_editor(
             edit, num_rows="dynamic", hide_index=True, key="editor",
             column_config={
                 "id": st.column_config.NumberColumn("ID", disabled=True),
                 "fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY", required=True),
-                "hora": st.column_config.TextColumn("Hora", help="HH:MM"),
+                "hora": st.column_config.TextColumn("Hora entrada", help="HH:MM"),
+                "hora_salida": st.column_config.TextColumn("Hora salida", help="HH:MM"),
                 "simbolo": st.column_config.TextColumn("Símbolo", required=True),
                 "lado": st.column_config.SelectboxColumn("Tipo", options=["Call", "Put"], required=True),
                 "entrada": st.column_config.NumberColumn("Entrada", format="%.2f", required=True),
@@ -747,7 +805,10 @@ with tabs[5]:
         )
         if st.button("💾 Guardar cambios", type="primary"):
             try:
-                n_upd, n_new, n_del = core.save_edits(df["id"].tolist(), edited.drop(columns=["pnl_neto"]))
+                guardar = edited.copy()
+                guardar["notas"] = [unir_salida(hs, nt) for hs, nt in zip(guardar["hora_salida"], guardar["notas"])]
+                guardar = guardar.drop(columns=["pnl_neto", "hora_salida"])
+                n_upd, n_new, n_del = core.save_edits(df["id"].tolist(), guardar)
                 st.success(f"Listo: {n_upd} actualizados, {n_new} nuevos, {n_del} borrados.")
                 st.rerun()
             except Exception as e:
@@ -770,5 +831,5 @@ with tabs[6]:
         c1, c2 = st.columns(2)
         c1.download_button("📥 Descargar Excel", core.build_excel(df, capital), f"{nombre}.xlsx",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
-        csv = df.drop(columns=["dt"]).to_csv(index=False).encode("utf-8")
+        csv = df.drop(columns=["dt", "notas_txt"], errors="ignore").to_csv(index=False).encode("utf-8")
         c2.download_button("📄 Descargar CSV de trades", csv, f"{nombre}.csv", "text/csv")
